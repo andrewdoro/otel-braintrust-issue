@@ -1,33 +1,38 @@
-# Braintrust OTEL Cost Calculation Issue
+# Braintrust OTEL Cost Calculation Issue — Cached Tokens in Tool Loop Agents
 
-This is a minimal reproduction example for the Braintrust cost calculation issue with OpenTelemetry and Gemini 3 Flash caching.
+Minimal reproduction showing that Braintrust's cost calculation via OpenTelemetry ignores cached input token discounts for tool loop agents using Gemini 3 Flash Preview.
 
-## Issue
+## The Problem
 
-When using AI SDK with experimental telemetry and Braintrust's OpenTelemetry integration, the cost calculation for Gemini 3 Flash appears to be incorrect when cached tokens are involved.
+When a `ToolLoopAgent` (AI SDK v6) runs multiple steps, each step re-sends the full conversation history to the model. Gemini automatically caches repeated prefix content, so later steps report a significant portion of input tokens as **cached** (at 10% of the normal input price). Braintrust appears to charge all input tokens at the full rate, inflating reported costs.
 
-### Expected Behavior
+### Pricing (Gemini 3 Flash Preview)
 
-For Gemini 3 Flash:
-- Input (Uncached): $0.50 / 1M tokens
-- Cached Read: $0.05 / 1M tokens (10% of input cost)
-- Output: $3.00 / 1M tokens
+| Token Type | Cost per 1M tokens |
+|---|---|
+| Input (uncached) | $0.50 |
+| Input (cached) | $0.05 (10% of input) |
+| Output (incl. thinking) | $3.00 |
 
-**Example calculation:**
-- Prompt tokens: 4,133,765
-- Cached tokens: 3,558,755
-- Uncached tokens: 575,010 (4,133,765 - 3,558,755)
-- Completion tokens: 13,041
+Source: https://ai.google.dev/gemini-api/docs/pricing
 
-Expected cost:
-- Uncached: 575,010 / 1,000,000 × $0.50 = $0.2875
-- Cached: 3,558,755 / 1,000,000 × $0.05 = $0.1779
-- Output: 13,041 / 1,000,000 × $3.00 = $0.0391
-- **Total: ~$0.50**
+### What the repro shows
 
-### Actual Behavior
+The agent fetches 6 pages of large content sequentially, producing 7 steps with growing context:
 
-Braintrust dashboard shows: **$2.80** (approximately 5.6x higher)
+| Step | Input Tokens | Cached Tokens | % Cached |
+|------|-------------|---------------|----------|
+| 1-3  | 200 → 18k   | 0             | 0%       |
+| 4    | ~26k        | ~16k          | 62%      |
+| 5    | ~34k        | ~24k          | 73%      |
+| 6    | ~42k        | ~33k          | 79%      |
+| 7    | ~50k        | ~41k          | 82%      |
+
+**Totals:** ~178k input tokens, ~114k cached (64%)
+
+- **Expected cost** (with cache discount): ~$0.04
+- **Cost if caching ignored** (all input at full rate): ~$0.09
+- **Braintrust reported cost:** check dashboard — expected to be closer to the inflated number
 
 ## Setup
 
@@ -36,62 +41,41 @@ Braintrust dashboard shows: **$2.80** (approximately 5.6x higher)
 npm install
 ```
 
-2. Set environment variables:
-```bash
-export BRAINTRUST_API_KEY=your_api_key
-export GOOGLE_GENERATIVE_AI_API_KEY=your_google_api_key
+2. Create a `.env.local` file:
+```
+BRAINTRUST_API_KEY=your_braintrust_api_key
+GOOGLE_GENERATIVE_AI_API_KEY=your_google_api_key
 ```
 
-3. Run the examples:
-
+3. Run:
 ```bash
-# Simple example
 npm start
-
-# Tool loop example (more similar to production usage)
-npx tsx src/tool-loop-example.ts
 ```
 
-## What to Check
+## What to check
 
-After running the examples:
+After running, go to the Braintrust dashboard:
 
-1. Check the console output for the calculated costs (note: cached tokens may not be visible in console but are sent via OTEL)
-2. Go to your Braintrust dashboard at https://www.braintrust.dev
-3. Find the traces for the project `otel-cost-issue-repro` or `otel-cost-issue-tool-loop`
-4. Compare the costs shown in Braintrust with the expected costs from console
-5. Look at the trace details to see:
-   - How many tokens were cached vs uncached
-   - What cost Braintrust calculated
-   - Compare with the expected cost formula
+1. Open https://www.braintrust.dev
+2. Find project: **otel-cost-issue-tool-loop**
+3. Look at the trace from the run
+4. Compare the **Braintrust reported cost** against the **expected cost** printed in the console
+5. In the per-step spans, check whether `cacheReadTokens` are factored into the cost or ignored
 
-**Note:** Gemini's automatic caching information is sent via OpenTelemetry to Braintrust, but may not be visible in the console `usage` object from the AI SDK. The issue is in how Braintrust calculates costs from the OTEL trace data.
+If Braintrust reports a cost roughly 2x the expected cost, it confirms that cached tokens are being charged at the full input rate.
 
-## Files
+## How it works
 
-- [src/index.ts](src/index.ts) - Simple generateText example with caching
-- [src/tool-loop-example.ts](src/tool-loop-example.ts) - ToolLoopAgent example (closer to production usage)
+- **`src/tool-loop-example.ts`** — Single file, single run
+- Uses `ToolLoopAgent` from AI SDK v6 with `@braintrust/otel` for OpenTelemetry tracing
+- Agent is instructed to read a 6-page document by calling `fetchPage` sequentially (one page per tool call)
+- Each page returns ~5-8k tokens of content, so context grows from ~200 tokens (step 1) to ~50k tokens (step 7)
+- Gemini's implicit caching kicks in around step 4 once the prefix is large enough
+- The script logs per-step token usage including `cacheReadTokens` and computes the expected cost using official Gemini pricing
 
-## Notes
+## Stack
 
-- This example uses **AI SDK experimental telemetry** with **@braintrust/otel** (matching production setup), NOT `wrapAISDK`
-- The cost calculation function in the examples matches the formula from Gemini's pricing page
-- Gemini 3 Flash uses automatic caching (implicit caching), not explicit cache control
-- The tool-loop example currently has issues with Gemini 3 Flash preview requiring thought signatures - use the simple example to demonstrate the cost issue
-
-## Checking Braintrust Dashboard
-
-After running the simple example (`npm start`), check:
-
-1. Go to https://www.braintrust.dev
-2. Look for the project: **otel-cost-issue-repro**
-3. Find the traces from today
-4. Each trace now includes custom attributes:
-   - `expected_cost`: The correct cost calculated using Gemini 3 Flash pricing
-   - `expected_cost_usd`: Formatted USD string of the expected cost
-5. Compare the estimated cost shown in Braintrust vs the `expected_cost` attribute
-6. Check the token breakdown to see if cached tokens are being accounted for correctly
-
-**Expected vs Actual:**
-- Expected total cost: **~$0.0066**
-- Braintrust should show this in the trace attributes for easy comparison
+- AI SDK v6 (`ai@^6.0.82`) — `ToolLoopAgent`, `tool`, `stepCountIs`
+- `@ai-sdk/google` — Gemini 3 Flash Preview
+- `@braintrust/otel` — Braintrust OpenTelemetry span processor
+- `@opentelemetry/sdk-node` — OpenTelemetry Node SDK
