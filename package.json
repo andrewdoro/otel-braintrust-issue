@@ -1,0 +1,23 @@
+{
+  "name": "braintrust-otel-cost-issue",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/google": "^1.0.0",
+    "@braintrust/otel": "^0.2.0",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/sdk-node": "^0.200.0",
+    "ai": "^4.0.0",
+    "braintrust": "^1.0.0",
+    "dotenv": "^17.2.4",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.3",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
